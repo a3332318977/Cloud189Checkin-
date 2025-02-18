@@ -1,8 +1,6 @@
-/* eslint-disable no-await-in-loop */
-const url = require("url");
+require("dotenv").config();
 const log4js = require("log4js");
 const recording = require("log4js/lib/appenders/recording");
-
 log4js.configure({
   appenders: {
     vcr: {
@@ -16,356 +14,70 @@ log4js.configure({
 });
 
 const logger = log4js.getLogger();
-const JSEncrypt = require("node-jsencrypt");
-// process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0'
 const superagent = require("superagent");
-const crypto = require("crypto");
+const { CloudClient } = require("cloud189-sdk");
 const serverChan = require("./push/serverChan");
 const telegramBot = require("./push/telegramBot");
 const wecomBot = require("./push/wecomBot");
 const wxpush = require("./push/wxPusher");
 const accounts = require("../accounts");
-const config = require("../config");
-
-const client = superagent.agent();
-const headers = {
-  "User-Agent": `Mozilla/5.0 (Linux; U; Android 11; ${config.model} Build/RP1A.201005.001) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/74.0.3729.136 Mobile Safari/537.36 Ecloud/${config.version} Android/30 clientId/${config.clientId} clientModel/${config.model} clientChannelId/qq proVersion/1.0.6`,
-  Referer:
-    "https://m.cloud.189.cn/zhuanti/2016/sign/index.jsp?albumBackupOpened=1",
-  "Accept-Encoding": "gzip, deflate",
-  Host: "cloud.189.cn",
-};
-
-const getEncrypt = () =>
-  new Promise((resolve, reject) => {
-    if (config.pubKey) {
-      resolve(config.pubKey);
-      return;
-    }
-    superagent
-      .post("https://open.e.189.cn/api/logbox/config/encryptConf.do")
-      .send("appId=cloud")
-      .end((err, res) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        const json = JSON.parse(res.text);
-        if (json.result === 0) {
-          resolve(json.data.pubKey);
-        } else {
-          reject(json.data);
-        }
-      });
-  });
-
-const redirectURL = () =>
-  new Promise((resolve, reject) => {
-    superagent
-      .get(
-        "https://cloud.189.cn/api/portal/loginUrl.action?redirectURL=https://cloud.189.cn/web/redirect.html?returnURL=/main.action"
-      )
-      .end((err, res) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        const { query } = url.parse(res.redirects[1], true);
-        resolve(query);
-      });
-  });
-
-const getLoginFormData = (username, password, encryptKey) =>
-  new Promise((resolve, reject) => {
-    redirectURL()
-      .then((query) => {
-        superagent
-          .post("https://open.e.189.cn/api/logbox/oauth2/appConf.do")
-          .set({
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:74.0) Gecko/20100101 Firefox/76.0",
-            Referer: "https://open.e.189.cn/",
-            lt: query.lt,
-            REQID: query.reqId,
-          })
-          .type("form")
-          .send({
-            version: "2.0",
-            appKey: "cloud",
-          })
-          .end((err, res) => {
-            if (err) {
-              reject(err);
-              return;
-            }
-            const resData = JSON.parse(res.text);
-            if (resData.result === "0") {
-              const keyData = `-----BEGIN PUBLIC KEY-----\n${encryptKey}\n-----END PUBLIC KEY-----`;
-              const jsencrypt = new JSEncrypt();
-              jsencrypt.setPublicKey(keyData);
-              const usernameEncrypt = Buffer.from(
-                jsencrypt.encrypt(username),
-                "base64"
-              ).toString("hex");
-              const passwordEncrypt = Buffer.from(
-                jsencrypt.encrypt(password),
-                "base64"
-              ).toString("hex");
-              const formData = {
-                returnUrl: resData.data.returnUrl,
-                paramId: resData.data.paramId,
-                lt: query.lt,
-                REQID: query.reqId,
-                userName: `{NRP}${usernameEncrypt}`,
-                password: `{NRP}${passwordEncrypt}`,
-              };
-              resolve(formData);
-            } else {
-              reject(new Error(resData.msg));
-            }
-          });
-      })
-      .catch((err) => {
-        reject(err);
-      });
-  });
-
-const login = (formData) =>
-  new Promise((resolve, reject) => {
-    const data = {
-      appKey: "cloud",
-      version: "2.0",
-      accountType: "01",
-      mailSuffix: "@189.cn",
-      validateCode: "",
-      returnUrl: formData.returnUrl,
-      paramId: formData.paramId,
-      captchaToken: "",
-      dynamicCheck: "FALSE",
-      clientType: "1",
-      cb_SaveName: "0",
-      isOauth2: false,
-      userName: formData.userName,
-      password: formData.password,
-    };
-    superagent
-      .post("https://open.e.189.cn/api/logbox/oauth2/loginSubmit.do")
-      .set({
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:74.0) Gecko/20100101 Firefox/76.0",
-        Referer: "https://open.e.189.cn/",
-        lt: formData.lt,
-        REQID: formData.REQID,
-      })
-      .type("form")
-      .send(data)
-      .end((err, res) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        const json = JSON.parse(res.text);
-        if (json.result !== 0) {
-          reject(json.msg);
-          return;
-        }
-        client
-          .get(json.toUrl)
-          .set(headers)
-          .end((e, r) => {
-            if (e) {
-              reject(e);
-              return;
-            }
-            resolve(r.statusCode);
-          });
-      });
-  });
-
-const doGet = (taskUrl) =>
-  new Promise((resolve, reject) => {
-    const q = url.parse(taskUrl, true);
-    client
-      .get(taskUrl)
-      .set({
-        ...headers,
-        Host: q.host,
-      })
-      .then((res) => resolve(res.body))
-      .catch((err) => reject(err));
-  });
+const families = require("../families");
+const pushPlus = require("./push/pushPlus");
+const execThreshold = process.env.EXEC_THRESHOLD || 1;
 
 const mask = (s, start, end) => s.split("").fill("*", start, end).join("");
 
-// 登录流程 1.获取公钥 -> 2.获取登录参数 -> 3.获取登录地址,跳转到登录页
-const doLogin = (userName, password) =>
-  new Promise((resolve, reject) => {
-    getEncrypt()
-      .then((encryptKey) => getLoginFormData(userName, password, encryptKey))
-      .then((formData) => login(formData))
-      .then(() => resolve("登录成功"))
-      .catch((error) => {
-        logger.error(`登录失败:${JSON.stringify(error)}`);
-        reject(error);
-      });
-  });
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 任务 1.签到 2.天天抽红包 3.自动备份抽红包
-const doTask = async () => {
-  const tasks = [
-    `https://cloud.189.cn/mkt/userSign.action?rand=${new Date().getTime()}&clientType=TELEANDROID&version=${
-      config.version
-    }&model=${config.model}`,
-    "https://m.cloud.189.cn/v2/drawPrizeMarketDetails.action?taskId=TASK_SIGNIN&activityId=ACT_SIGNIN",
-    "https://m.cloud.189.cn/v2/drawPrizeMarketDetails.action?taskId=TASK_SIGNIN_PHOTOS&activityId=ACT_SIGNIN",
-    "https://m.cloud.189.cn/v2/drawPrizeMarketDetails.action?taskId=TASK_2022_FLDFS_KJ&activityId=ACT_SIGNIN",
-  ];
-
-  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const result = [];
-  for (let index = 0; index < tasks.length; index += 1) {
-    const task = tasks[index];
-    const res = await doGet(task);
-    if (index === 0) {
-      // 签到
-      result.push(
-        `${res.isSign ? "已经签到过了，" : ""}签到获得${res.netdiskBonus}M空间`
-      );
-    } else if (res.errorCode === "User_Not_Chance") {
-      result.push(`第${index}次抽奖失败,次数不足`);
-    } else {
-      result.push(`第${index}次抽奖成功,抽奖获得${res.prizeName}`);
-    }
-    await delay(5000); // 延迟5秒
-  }
+// 任务 1.签到
+const doUserTask = async (cloudClient) => {
+  const tasks = Array.from({ length: execThreshold }, () =>
+    cloudClient.userSign()
+  );
+  const result = (await Promise.all(tasks)).map(
+    (res) =>
+      `个人任务${res.isSign ? "已经签到过了，" : ""}签到获得${
+        res.netdiskBonus
+      }M空间`
+  );
   return result;
 };
 
-const getUserBriefInfo = () =>
-  new Promise((resolve, reject) => {
-    client
-      .get("https://cloud.189.cn/api/portal/v2/getUserBriefInfo.action")
-      .then((res) => resolve(res.body))
-      .catch((err) => reject(err));
-  });
-
-const parameter = (data) => {
-  if (!data) {
-    return {};
-  }
-  const e = Object.entries(data).map((t) => t.join("="));
-  e.sort((a, b) => (a > b ? 1 : a < b ? -1 : 0));
-  return e.join("&");
-};
-
-const getSignature = (data) => {
-  const sig = parameter(data);
-  return crypto.createHash("md5").update(sig).digest("hex");
-};
-
-const getAccessTokenBySsKey = (sessionKey) =>
-  new Promise((resolve, reject) => {
-    const appkey = "600100422";
-    const time = String(Date.now());
-
-    const signature = getSignature({
-      sessionKey,
-      Timestamp: time,
-      AppKey: appkey,
-    });
-
-    client
-      .get(
-        `https://cloud.189.cn/api/open/oauth2/getAccessTokenBySsKey.action?sessionKey=${sessionKey}`
-      )
-      .set({
-        "Sign-Type": "1",
-        Signature: signature,
-        Timestamp: time,
-        Appkey: appkey,
-      })
-      .end((err, res) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        resolve(JSON.parse(res.text));
-      });
-  });
-
-const getFamilyList = (accessToken) =>
-  new Promise((resolve, reject) => {
-    const time = String(Date.now());
-    const signature = getSignature({
-      Timestamp: time,
-      AccessToken: accessToken,
-    });
-    client
-      .get("https://api.cloud.189.cn/open/family/manage/getFamilyList.action")
-      .set({
-        "Sign-Type": "1",
-        Signature: signature,
-        Timestamp: time,
-        Accesstoken: accessToken,
-        Accept: "application/json;charset=UTF-8",
-      })
-      .then((res) => resolve(res.body))
-      .catch((err) => reject(err));
-  });
-
-const familyUserSign = (familyId, accessToken) =>
-  new Promise((resolve, reject) => {
-    const time = String(Date.now());
-    const data = {
-      familyId,
-    };
-    const signature = getSignature({
-      ...data,
-      Timestamp: time,
-      AccessToken: accessToken,
-    });
-    const gturl = `https://api.cloud.189.cn/open/family/manage/exeFamilyUserSign.action?familyId=${familyId}`;
-    client
-      .get(gturl)
-      .set({
-        "Sign-Type": "1",
-        Signature: signature,
-        Timestamp: time,
-        Accesstoken: accessToken,
-        Accept: "application/json;charset=UTF-8",
-      })
-      .then((res) => resolve(res.body))
-      .catch((err) => reject(err));
-  });
-
-const doFamilyTask = async () => {
-  const { sessionKey } = await getUserBriefInfo();
-  const { accessToken } = await getAccessTokenBySsKey(sessionKey);
-  const { familyInfoResp } = await getFamilyList(accessToken);
-  const result = [];
+const doFamilyTask = async (cloudClient) => {
+  const { familyInfoResp } = await cloudClient.getFamilyList();
   if (familyInfoResp) {
-    for (let index = 0; index < familyInfoResp.length; index += 1) {
-      const { familyId } = familyInfoResp[index];
-      const res = await familyUserSign(familyId, accessToken);
-      result.push(
-        "家庭任务" +
-          `${res.signStatus ? "已经签到过了，" : ""}签到获得${
-            res.bonusSpace
-          }M空间`
+    let familyId = null;
+    //指定家庭签到
+    if (families.length > 0) {
+      const tagetFamily = familyInfoResp.find((familyInfo) =>
+        families.includes(familyInfo.remarkName)
       );
+      if (tagetFamily) {
+        familyId = tagetFamily.familyId;
+      } else {
+        return [
+          `没有加入到指定家庭分组${families
+            .map((family) => mask(family, 3, 7))
+            .toString()}`,
+        ];
+      }
+    } else {
+      familyId = familyInfoResp[0].familyId;
     }
+    logger.info(`执行家庭签到ID:${familyId}`);
+    const tasks = Array.from({ length: execThreshold }, () =>
+      cloudClient.familyUserSign(familyId)
+    );
+    const result = (await Promise.all(tasks)).map(
+      (res) =>
+        `家庭任务${res.signStatus ? "已经签到过了，" : ""}签到获得${
+          res.bonusSpace
+        }M空间`
+    );
+    return result;
   }
-  return result;
+  return [];
 };
-
-const getUserSizeInfo = () =>
-  new Promise((resolve, reject) => {
-    client
-      .get("https://cloud.189.cn/api/portal/getUserSizeInfo.action")
-      .set({ Accept: "application/json;charset=UTF-8" })
-      .then((res) => resolve(res.body))
-      .catch((err) => reject(err));
-  });
 
 const pushServerChan = (title, desp) => {
   if (!serverChan.sendKey) {
@@ -476,16 +188,47 @@ const pushWxPusher = (title, desp) => {
       }
     });
 };
+const pushPlusPusher = (title, desp) => {
+  // 如果没有配置 pushPlus 的 token，则不执行推送
+  if (!(pushPlus.token)) {
+    return;
+  }
+  // 请求体
+  const data = {
+    token: pushPlus.token,
+    title: title,
+    content: desp
+  };
+  // 发送请求
+  superagent
+      .post("http://www.pushplus.plus/send/")
+      .send(data)
+      .end((err, res) => {
+        if (err) {
+          logger.error(`pushPlus 推送失败:${JSON.stringify(err)}`);
+          return;
+        }
+        const json = JSON.parse(res.text);
+        if (json.code !== 200) {
+          logger.error(`pushPlus 推送失败:${JSON.stringify(json)}`);
+        } else {
+          logger.info("pushPlus 推送成功");
+        }
+      });
+};
 
 const push = (title, desp) => {
   pushServerChan(title, desp);
   pushTelegramBot(title, desp);
   pushWecomBot(title, desp);
   pushWxPusher(title, desp);
+  pushPlusPusher(title, desp);
 };
 
 // 开始执行程序
 async function main() {
+  //用于统计实际容量变化
+  const userSizeInfoMap = new Map();
   for (let index = 0; index < accounts.length; index += 1) {
     const account = accounts[index];
     const { userName, password } = account;
@@ -493,35 +236,46 @@ async function main() {
       const userNameInfo = mask(userName, 3, 7);
       try {
         logger.log(`账户 ${userNameInfo}开始执行`);
-        await doLogin(userName, password);
-        const result = await doTask();
+        const cloudClient = new CloudClient(userName, password);
+        await cloudClient.login();
+        const beforeUserSizeInfo = await cloudClient.getUserSizeInfo();
+        userSizeInfoMap.set(userName, {
+          cloudClient,
+          userSizeInfo: beforeUserSizeInfo,
+        });
+        const result = await doUserTask(cloudClient);
         result.forEach((r) => logger.log(r));
-        const familyResult = await doFamilyTask();
+        const familyResult = await doFamilyTask(cloudClient);
         familyResult.forEach((r) => logger.log(r));
-        logger.log("任务执行完毕");
-        const { cloudCapacityInfo, familyCapacityInfo } =
-          await getUserSizeInfo();
-        logger.log(
-          `个人总容量：${(
-            cloudCapacityInfo.totalSize /
-            1024 /
-            1024 /
-            1024
-          ).toFixed(2)}G,家庭总容量：${(
-            familyCapacityInfo.totalSize /
-            1024 /
-            1024 /
-            1024
-          ).toFixed(2)}G`
-        );
       } catch (e) {
-        if (e.code === "ECONNRESET") {
+        logger.error(e);
+        if (e.code === "ETIMEDOUT") {
           throw e;
         }
       } finally {
         logger.log(`账户 ${userNameInfo}执行完毕`);
       }
     }
+  }
+
+  //数据汇总
+  for (const [userName, { cloudClient, userSizeInfo }] of userSizeInfoMap) {
+    const userNameInfo = mask(userName, 3, 7);
+    const afterUserSizeInfo = await cloudClient.getUserSizeInfo();
+    logger.log(`账户 ${userNameInfo}实际容量变化:`);
+    logger.log(
+      `个人总容量增加：${(
+        (afterUserSizeInfo.cloudCapacityInfo.totalSize -
+          userSizeInfo.cloudCapacityInfo.totalSize) /
+        1024 /
+        1024
+      ).toFixed(2)}M,家庭容量增加：${(
+        (afterUserSizeInfo.familyCapacityInfo.totalSize -
+          userSizeInfo.familyCapacityInfo.totalSize) /
+        1024 /
+        1024
+      ).toFixed(2)}M`
+    );
   }
 }
 
